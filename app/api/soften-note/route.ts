@@ -27,6 +27,7 @@ export async function POST(req: NextRequest) {
         }
 
         const HF_TOKEN = process.env.HF_TOKEN;
+        console.log("Soften Note Request — HF_TOKEN present:", !!HF_TOKEN);
         if (!HF_TOKEN) {
             return NextResponse.json({ softenedNote: note }); // Fallback to original
         }

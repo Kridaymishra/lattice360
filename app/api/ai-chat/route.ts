@@ -23,6 +23,7 @@ export async function POST(req: NextRequest) {
         const { messages } = await req.json();
 
         const HF_TOKEN = process.env.HF_TOKEN;
+        console.log("AI Chat Request — HF_TOKEN present:", !!HF_TOKEN);
         if (!HF_TOKEN) {
             return new Response(
                 JSON.stringify({ error: "AI service is not configured. Please contact your administrator." }),

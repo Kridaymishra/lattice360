@@ -28,8 +28,10 @@ export async function POST(req: NextRequest) {
             chatHighlights,
         } = await req.json();
 
-        const LLM_API_URL = process.env.LLM_API_URL;
-        const LLM_API_KEY = process.env.LLM_API_KEY;
+        const LLM_API_KEY = process.env.HF_TOKEN || process.env.LLM_API_KEY;
+        const LLM_API_URL = process.env.LLM_API_URL || "https://router.huggingface.co/v1/chat/completions";
+
+        console.log("Generate Report Request — HF_TOKEN/LLM_API_KEY present:", !!LLM_API_KEY);
 
         /* ── Build subject attendance summary ── */
         const attLines = (subjectAttendance as SubjAtt[] || [])
