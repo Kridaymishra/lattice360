@@ -7,7 +7,7 @@ import {
   BookOpen, BarChart3, Download, Plus, ClipboardList, Send, X,
   RefreshCw, Calendar, Clock, FileText, Lock, Eye, Filter,
   UserCheck, CalendarX, MessageSquare, Search, Trash2, StickyNote, CalendarPlus, Minus,
-  Heart, Reply,
+  Heart, Reply, Sparkles, Zap,
 } from "lucide-react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
@@ -115,6 +115,11 @@ export default function MentorDashboard() {
   const [schedDate, setSchedDate] = useState("");
   const [schedTime, setSchedTime] = useState("");
   const [savingSched, setSavingSched] = useState(false);
+
+  /* AI report */
+  const [aiStudent, setAiStudent] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiSummary, setAiSummary] = useState<string | null>(null);
 
   /* report */
   const [reportStudent, setReportStudent] = useState("");
@@ -288,6 +293,169 @@ export default function MentorDashboard() {
     } catch (error: unknown) { alert("Reply failed: " + ((error as { message?: string }).message || JSON.stringify(error))); }
   };
 
+  /* ═══════ AI Monthly Report ═══════ */
+  const generateAIReport = async () => {
+    if (!aiStudent) { alert("Select a student first."); return; }
+    setAiLoading(true); setAiSummary(null);
+    try {
+      /* 1 — Aggregate ALL data */
+      const stu = students.find(s => s.id === aiStudent);
+      const rec = records.find(r => r.student_id === aiStudent);
+
+      /* Attendance — actual academic attendance, NOT session count */
+      const realAttPct = avgAtt(rec?.attendance_data);
+      const attendancePct = realAttPct >= 0 ? realAttPct : 0;
+      const subjectAttendance = (rec?.attendance_data || []).filter(a => a.total_periods > 0)
+        .map(a => ({ subject: a.subject, pct: Math.round((a.attended / a.total_periods) * 100), attended: a.attended, total: a.total_periods }));
+
+      /* Mid-term scores */
+      const midTermScores = (rec?.mid_term_scores || []).map(m => ({ subject: m.subject, score: m.score }));
+
+      /* Tasks — query from DB since not in page state */
+      const { data: stuTasksData } = await supabase.from("tasks").select("*").eq("student_id", aiStudent);
+      const stuTasks: TaskItem[] = stuTasksData || [];
+      const totalTasks = stuTasks.length;
+      const completedTasks = stuTasks.filter(t => t.is_completed).length;
+      const pendingTasks = stuTasks.filter(t => !t.is_completed).map(t => t.title);
+
+      /* Sessions */
+      const stuSessions = sessions.filter(s => s.student_id === aiStudent);
+      const totalSessions = stuSessions.length;
+      const confirmedSessions = stuSessions.filter(s => s.status === "confirmed" || s.status === "completed").length;
+
+      /* Wellness updates */
+      const stuUpdates = studentUpdates.filter(u => u.student_id === aiStudent).slice(0, 10);
+      const chatHighlights = stuUpdates
+        .map(u => `Student: ${u.content}${u.mentor_reply ? `\nMentor: ${u.mentor_reply}` : ""}`)
+        .join("\n---\n");
+
+      /* 2 — Call API route */
+      const res = await fetch("/api/generate-report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          studentName: stu?.full_name || "Unknown",
+          branch: stu?.branch || "N/A",
+          studyYear: stu?.study_year || "N/A",
+          cgpa: rec?.cgpa ?? "N/A",
+          sgpa: rec?.sgpa ?? "N/A",
+          attendancePct,
+          subjectAttendance,
+          midTermScores,
+          totalTasks, completedTasks, pendingTasks,
+          totalSessions, confirmedSessions,
+          chatHighlights,
+        }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      const summary = data.summary;
+      setAiSummary(summary);
+
+      /* 3 — Generate PDF */
+      const { jsPDF } = await import("jspdf");
+      const doc = new jsPDF();
+      const c1: [number, number, number] = [36, 72, 85];
+      const dt = new Date().toLocaleDateString("en-IN", { year: "numeric", month: "long", day: "numeric" });
+
+      /* Header bar */
+      doc.setFillColor(36, 72, 85);
+      doc.rect(0, 0, 210, 32, "F");
+      doc.setFontSize(20); doc.setTextColor(251, 233, 208);
+      doc.text("Lattice360 — Comprehensive AI Report", 14, 18);
+      doc.setFontSize(9); doc.setTextColor(144, 174, 173);
+      doc.text(`Generated on ${dt}`, 14, 26);
+
+      /* Student info card */
+      let y = 42;
+      doc.setFillColor(251, 233, 208);
+      doc.roundedRect(12, 36, 186, 28, 3, 3, "F");
+      doc.setFontSize(14); doc.setTextColor(...c1);
+      doc.text(stu?.full_name || "Unknown", 18, y + 4);
+      doc.setFontSize(10); doc.setTextColor(100);
+      doc.text(`Branch: ${stu?.branch || "—"}  |  Year: ${stu?.study_year || "—"}`, 18, y + 12);
+      doc.text(`CGPA: ${rec?.cgpa ?? "N/A"}  |  SGPA: ${rec?.sgpa ?? "N/A"}  |  Overall Attendance: ${attendancePct}%`, 18, y + 20);
+
+      /* Subject-wise Attendance */
+      y = 72;
+      if (subjectAttendance.length > 0) {
+        doc.setFillColor(230, 72, 51); doc.rect(12, y, 3, 6, "F");
+        doc.setFontSize(13); doc.setTextColor(...c1);
+        doc.text("Subject-wise Attendance", 18, y + 5);
+        y += 12;
+        doc.setFontSize(9); doc.setTextColor(60);
+        for (const sa of subjectAttendance) {
+          doc.text(`• ${sa.subject}: ${sa.attended}/${sa.total} (${sa.pct}%)`, 20, y);
+          y += 5;
+          if (y > 270) { doc.addPage(); y = 20; }
+        }
+        y += 4;
+      }
+
+      /* Mid-term Scores */
+      if (midTermScores.length > 0) {
+        if (y > 250) { doc.addPage(); y = 20; }
+        doc.setFillColor(230, 72, 51); doc.rect(12, y, 3, 6, "F");
+        doc.setFontSize(13); doc.setTextColor(...c1);
+        doc.text("Mid-term Scores", 18, y + 5);
+        y += 12;
+        doc.setFontSize(9); doc.setTextColor(60);
+        for (const ms of midTermScores) {
+          doc.text(`• ${ms.subject}: ${ms.score}`, 20, y);
+          y += 5;
+          if (y > 270) { doc.addPage(); y = 20; }
+        }
+        y += 4;
+      }
+
+      /* Tasks Overview */
+      if (y > 250) { doc.addPage(); y = 20; }
+      doc.setFillColor(230, 72, 51); doc.rect(12, y, 3, 6, "F");
+      doc.setFontSize(13); doc.setTextColor(...c1);
+      doc.text("Tasks Overview", 18, y + 5);
+      y += 12;
+      doc.setFontSize(9); doc.setTextColor(60);
+      doc.text(`Total: ${totalTasks}  |  Completed: ${completedTasks}  |  Pending: ${totalTasks - completedTasks}`, 20, y);
+      y += 6;
+      if (pendingTasks.length > 0) {
+        for (const t of pendingTasks.slice(0, 5)) {
+          doc.text(`  ○ ${t}`, 22, y); y += 5;
+          if (y > 270) { doc.addPage(); y = 20; }
+        }
+      }
+      y += 4;
+
+      /* Session History */
+      if (y > 250) { doc.addPage(); y = 20; }
+      doc.setFillColor(230, 72, 51); doc.rect(12, y, 3, 6, "F");
+      doc.setFontSize(13); doc.setTextColor(...c1);
+      doc.text("Session History", 18, y + 5);
+      y += 12;
+      doc.setFontSize(9); doc.setTextColor(60);
+      doc.text(`Total Sessions: ${totalSessions}  |  Confirmed/Completed: ${confirmedSessions}`, 20, y);
+      y += 8;
+
+      /* AI Summary */
+      if (y > 240) { doc.addPage(); y = 20; }
+      doc.setFillColor(230, 72, 51); doc.rect(12, y, 3, 6, "F");
+      doc.setFontSize(13); doc.setTextColor(...c1);
+      doc.text("AI-Generated Summary", 18, y + 5);
+      y += 14;
+      doc.setFontSize(10); doc.setTextColor(60);
+      const wrappedLines = doc.splitTextToSize(summary, 176);
+      doc.text(wrappedLines, 18, y);
+      y += wrappedLines.length * 5 + 10;
+
+      /* Footer */
+      if (y > 270) { doc.addPage(); y = 20; }
+      doc.setFontSize(8); doc.setTextColor(160);
+      doc.text("This report was generated by Lattice360 AI Insights. For questions, contact the mentor.", 14, 285);
+
+      doc.save(`Lattice360_AI_Report_${stu?.full_name || "student"}.pdf`);
+    } catch (err: unknown) { alert("AI Report failed: " + (err instanceof Error ? err.message : JSON.stringify(err))); }
+    setAiLoading(false);
+  };
+
   /* ═══════ PDF ═══════ */
   const generatePDF = async (studentId?: string) => {
     const { jsPDF } = await import("jspdf");
@@ -418,6 +586,60 @@ export default function MentorDashboard() {
 
                 {/* ══════════ TAB: ROSTER ══════════ */}
                 {tab === "roster" && (<>
+                  {/* ── AI HERO CARD (Hugging Face-inspired) ── */}
+                  <motion.div variants={iV} className="relative overflow-hidden rounded-2xl shadow-xl border border-white/20">
+                    {/* gradient bg */}
+                    <div className="absolute inset-0 bg-gradient-to-br from-[#0f172a] via-[#1e293b] to-[#244855]"></div>
+                    <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,rgba(230,72,51,0.15),transparent_60%),radial-gradient(ellipse_at_bottom_left,rgba(135,79,65,0.12),transparent_50%)]"></div>
+                    {/* animated dots */}
+                    <div className="absolute top-4 right-6 flex gap-1">
+                      {[...Array(3)].map((_, i) => (<motion.div key={i} className="w-1.5 h-1.5 rounded-full bg-[#E64833]/50" animate={{ opacity: [0.3, 1, 0.3], scale: [0.8, 1.2, 0.8] }} transition={{ duration: 2, delay: i * 0.4, repeat: Infinity }} />))}
+                    </div>
+                    <div className="relative p-6 md:p-8">
+                      <div className="flex flex-col lg:flex-row lg:items-center gap-6">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-3 mb-3">
+                            <div className="p-2.5 bg-gradient-to-br from-[#E64833] to-[#874F41] rounded-xl shadow-lg shadow-[#E64833]/25">
+                              <Sparkles size={20} className="text-white" />
+                            </div>
+                            <div>
+                              <h2 className="text-xl font-extrabold text-white tracking-tight">AI Insights & Reporting</h2>
+                              <p className="text-[11px] text-[#90AEAD] font-medium uppercase tracking-widest">Powered by LLM</p>
+                            </div>
+                          </div>
+                          <p className="text-sm text-slate-300/90 leading-relaxed max-w-lg">Generate a professional, AI-crafted monthly report for any student — including academic metrics, attendance, and wellness chat analysis — delivered as a PDF.</p>
+                        </div>
+                        <div className="flex flex-col sm:flex-row items-stretch gap-3 lg:min-w-[360px]">
+                          <select value={aiStudent} onChange={e => setAiStudent(e.target.value)}
+                            className="flex-1 px-4 py-3 bg-white/10 backdrop-blur-sm border border-white/15 rounded-xl text-sm text-white placeholder:text-slate-400 outline-none focus:border-[#E64833]/60 transition appearance-none">
+                            <option value="" className="text-gray-800">Choose a student…</option>
+                            {students.map(s => (<option key={s.id} value={s.id} className="text-gray-800">{s.full_name || s.email}</option>))}
+                          </select>
+                          <motion.button
+                            whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }}
+                            onClick={generateAIReport} disabled={aiLoading}
+                            className="px-6 py-3 bg-gradient-to-r from-[#E64833] to-[#c93e2b] hover:from-[#c93e2b] hover:to-[#a83424] text-white rounded-xl font-bold text-sm shadow-xl shadow-[#E64833]/30 disabled:opacity-50 flex items-center justify-center gap-2 transition-all whitespace-nowrap">
+                            {aiLoading ? (
+                              <><motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 0.8, ease: "linear" }}><RefreshCw size={16} /></motion.div>Generating…</>
+                            ) : (
+                              <><Zap size={16} />Generate AI Report</>
+                            )}
+                          </motion.button>
+                        </div>
+                      </div>
+                      {/* Success banner */}
+                      {aiSummary && !aiLoading && (
+                        <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="mt-5 p-4 bg-emerald-500/10 border border-emerald-400/20 rounded-xl">
+                          <div className="flex items-center gap-2">
+                            <CheckCircle size={16} className="text-emerald-400" />
+                            <p className="text-sm text-emerald-300 font-medium">AI report generated & PDF downloaded successfully!</p>
+                          </div>
+                          <p className="text-xs text-emerald-400/60 mt-1 line-clamp-2">{aiSummary.slice(0, 180)}…</p>
+                        </motion.div>
+                      )}
+                    </div>
+                  </motion.div>
+
                   <motion.div variants={iV} className="bg-white rounded-2xl shadow-sm border border-[#90AEAD]/20 overflow-hidden">
                     <div className="p-1.5">
                       <div className="bg-[#244855] rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-3">

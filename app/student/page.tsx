@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { motion, AnimatePresence, type Variants } from "framer-motion";
 import {
   Shield, ChevronRight, AlertTriangle, CheckCircle, XCircle,
   BookOpen, BarChart3, Eye, EyeOff, ClipboardList, RefreshCw, X,
   Calendar, Clock, CalendarPlus, User, MessageSquareText, TrendingUp,
-  CheckSquare, Square, Minus, Heart, Send, Reply,
+  CheckSquare, Square, Minus, Heart, Send, Reply, Bot, Sparkles,
+  Activity,
 } from "lucide-react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
@@ -48,7 +49,7 @@ const cV: Variants = { hidden: { opacity: 0 }, show: { opacity: 1, transition: {
 const iV: Variants = { hidden: { opacity: 0, y: 16 }, show: { opacity: 1, y: 0, transition: { type: "spring", stiffness: 260, damping: 24 } } };
 const tabV: Variants = { enter: { opacity: 0, x: 20 }, center: { opacity: 1, x: 0, transition: { duration: 0.22 } }, exit: { opacity: 0, x: -20, transition: { duration: 0.14 } } };
 
-type Tab = "profile" | "academics" | "tasks" | "appointments" | "wellness";
+type Tab = "profile" | "academics" | "tasks" | "appointments" | "ai" | "wellness";
 
 /* ═══════════════════════════════════════════════════════════════
    STUDENT DASHBOARD
@@ -66,6 +67,13 @@ export default function StudentDashboard() {
   /* wellness update form */
   const [updateContent, setUpdateContent] = useState("");
   const [savingUpdate, setSavingUpdate] = useState(false);
+
+  /* AI chat */
+  interface ChatMsg { role: "user" | "assistant"; content: string }
+  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   /* consent (local toggle — stored in localStorage for demo) */
   const [hideWellness, setHideWellness] = useState(false);
@@ -199,6 +207,79 @@ export default function StudentDashboard() {
     setSavingUpdate(false);
   };
 
+  /* ── AI chat ── */
+  const sendChat = useCallback(async () => {
+    if (!chatInput.trim() || chatLoading) return;
+    const userMsg: ChatMsg = { role: "user", content: chatInput.trim() };
+    const newMessages = [...chatMessages, userMsg];
+    setChatMessages(newMessages);
+    setChatInput("");
+    setChatLoading(true);
+
+    try {
+      const res = await fetch("/api/ai-chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: newMessages.map(m => ({ role: m.role, content: m.content })) }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Unknown error" }));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+
+      /* Stream SSE response */
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      let assistantContent = "";
+      setChatMessages(prev => [...prev, { role: "assistant", content: "" }]);
+
+      if (reader) {
+        let buffer = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            const data = line.slice(6).trim();
+            if (data === "[DONE]") break;
+            try {
+              const parsed = JSON.parse(data);
+              const delta = parsed.choices?.[0]?.delta?.content || "";
+              assistantContent += delta;
+              setChatMessages(prev => {
+                const updated = [...prev];
+                updated[updated.length - 1] = { role: "assistant", content: assistantContent };
+                return updated;
+              });
+            } catch { /* skip malformed chunks */ }
+          }
+        }
+      }
+
+      /* If streaming produced nothing, treat as non-streaming response */
+      if (!assistantContent) {
+        setChatMessages(prev => {
+          const updated = [...prev];
+          updated[updated.length - 1] = { role: "assistant", content: "I'm sorry, I couldn't generate a response. Please try again." };
+          return updated;
+        });
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setChatMessages(prev => [...prev, { role: "assistant", content: `⚠️ Error: ${msg}` }]);
+    }
+    setChatLoading(false);
+  }, [chatInput, chatLoading, chatMessages]);
+
+  /* auto-scroll chat */
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages]);
+
   if (loading) return <div className="min-h-screen bg-[#FBE9D0] flex items-center justify-center"><motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: "linear" }}><RefreshCw size={36} className="text-[#244855]" /></motion.div></div>;
 
   const TABS: { label: string; icon: typeof User; key: Tab }[] = [
@@ -206,6 +287,7 @@ export default function StudentDashboard() {
     { label: "Academics", icon: BarChart3, key: "academics" },
     { label: "Tasks", icon: ClipboardList, key: "tasks" },
     { label: "Appointments", icon: Calendar, key: "appointments" },
+    { label: "AI Assistant", icon: Bot, key: "ai" },
     { label: "Wellness", icon: Heart, key: "wellness" },
   ];
   const midTermData = record?.mid_term_scores?.map(m => ({ name: m.subject, score: m.score })) || [];
@@ -482,6 +564,99 @@ export default function StudentDashboard() {
                           </motion.div>
                         );
                       })}
+                    </div>
+                  </motion.div>
+                )}
+
+                {/* ═══ AI ASSISTANT ═══ */}
+                {tab === "ai" && (
+                  <motion.div variants={iV} className="bg-white rounded-2xl shadow-sm border border-[#90AEAD]/20 overflow-hidden flex flex-col" style={{ height: "calc(100vh - 140px)", minHeight: 500 }}>
+                    {/* Header */}
+                    <div className="p-1.5 shrink-0">
+                      <div className="bg-gradient-to-r from-[#0f172a] via-[#1e293b] to-[#244855] rounded-xl p-4 flex items-center gap-2.5">
+                        <div className="p-2 bg-gradient-to-br from-[#E64833] to-[#874F41] rounded-xl shadow-lg shadow-[#E64833]/25">
+                          <Sparkles size={18} className="text-white" />
+                        </div>
+                        <div>
+                          <h2 className="text-base font-bold text-[#FBE9D0]">AI Assistant</h2>
+                          <p className="text-[10px] text-[#90AEAD] font-medium uppercase tracking-widest">Powered by Qwen 2.5</p>
+                        </div>
+                        {chatMessages.length > 0 && (
+                          <button onClick={() => setChatMessages([])} className="ml-auto px-3 py-1 bg-white/10 hover:bg-white/20 rounded-lg text-[10px] font-bold text-[#FBE9D0]/70 transition">Clear Chat</button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Messages */}
+                    <div className="flex-1 overflow-y-auto p-5 space-y-4">
+                      {chatMessages.length === 0 && (
+                        <div className="flex flex-col items-center justify-center h-full text-center py-12">
+                          <div className="p-4 bg-gradient-to-br from-[#E64833]/10 to-[#874F41]/10 rounded-2xl mb-4">
+                            <Bot size={40} className="text-[#E64833]" />
+                          </div>
+                          <h3 className="text-lg font-bold text-[#244855] mb-2">How can I help you today?</h3>
+                          <p className="text-sm text-[#90AEAD] max-w-sm">Ask me about study tips, exam strategies, time management, or any academic questions.</p>
+                          <div className="mt-6 flex flex-wrap justify-center gap-2">
+                            {["Study tips for exams", "How to improve my GPA?", "Time management advice"].map(q => (
+                              <button key={q} onClick={() => { setChatInput(q); }} className="px-3 py-1.5 bg-[#FBE9D0]/50 border border-[#90AEAD]/20 rounded-full text-xs font-medium text-[#874F41] hover:bg-[#FBE9D0] hover:border-[#E64833]/30 transition">
+                                {q}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {chatMessages.map((msg, i) => (
+                        <motion.div key={i} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }}
+                          className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                          <div className={`max-w-[80%] rounded-2xl px-4 py-3 ${msg.role === "user"
+                            ? "bg-gradient-to-r from-[#E64833] to-[#874F41] text-white rounded-br-md"
+                            : "bg-[#FBE9D0]/40 border border-[#90AEAD]/15 text-[#244855] rounded-bl-md"
+                            }`}>
+                            {msg.role === "assistant" && (
+                              <div className="flex items-center gap-1.5 mb-1.5">
+                                <Bot size={12} className="text-[#E64833]" />
+                                <span className="text-[10px] font-bold text-[#874F41] uppercase tracking-wider">Lattice360 AI</span>
+                              </div>
+                            )}
+                            <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content || (chatLoading && i === chatMessages.length - 1 ? "" : "")}</p>
+                            {chatLoading && i === chatMessages.length - 1 && msg.role === "assistant" && !msg.content && (
+                              <div className="flex gap-1 mt-1">
+                                {[0, 1, 2].map(d => (
+                                  <motion.div key={d} className="w-1.5 h-1.5 rounded-full bg-[#E64833]/50"
+                                    animate={{ opacity: [0.3, 1, 0.3], scale: [0.8, 1.2, 0.8] }}
+                                    transition={{ duration: 1.2, delay: d * 0.2, repeat: Infinity }} />
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </motion.div>
+                      ))}
+                      <div ref={chatEndRef} />
+                    </div>
+
+                    {/* Input */}
+                    <div className="shrink-0 p-4 border-t border-[#90AEAD]/15 bg-white">
+                      <div className="flex gap-2">
+                        <input
+                          value={chatInput}
+                          onChange={e => setChatInput(e.target.value)}
+                          onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
+                          placeholder="Ask anything about academics, study tips, or career advice…"
+                          className="flex-1 p-3 border-2 border-[#90AEAD]/30 rounded-xl text-sm focus:border-[#E64833] outline-none bg-[#FBE9D0]/10 placeholder:text-[#90AEAD]/50"
+                          disabled={chatLoading}
+                        />
+                        <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}
+                          onClick={sendChat} disabled={chatLoading || !chatInput.trim()}
+                          className="px-5 py-3 bg-gradient-to-r from-[#E64833] to-[#874F41] text-white rounded-xl font-bold disabled:opacity-40 flex items-center gap-2 shadow-lg shadow-[#E64833]/20 transition">
+                          {chatLoading ? (
+                            <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 0.8, ease: "linear" }}>
+                              <RefreshCw size={16} />
+                            </motion.div>
+                          ) : (
+                            <Send size={16} />
+                          )}
+                        </motion.button>
+                      </div>
                     </div>
                   </motion.div>
                 )}

@@ -71,7 +71,24 @@ export default function ParentDashboard() {
                         if (ar) setRecord(ar);
 
                         const { data: mn } = await supabase.from("mentor_notes").select("*").eq("student_id", child.id).eq("is_confidential", false).order("id", { ascending: false });
-                        if (mn) setNotes(mn);
+                        if (mn) {
+                            /* Soften Notes for Parent Mode */
+                            const softened = await Promise.all(mn.map(async (n) => {
+                                try {
+                                    const res = await fetch("/api/soften-note", {
+                                        method: "POST",
+                                        headers: { "Content-Type": "application/json" },
+                                        body: JSON.stringify({ note: n.note_content }),
+                                    });
+                                    if (res.ok) {
+                                        const data = await res.json();
+                                        return { ...n, note_content: data.softenedNote };
+                                    }
+                                } catch { /* Use original if API fails */ }
+                                return n;
+                            }));
+                            setNotes(softened);
+                        }
                     }
                 }
             } catch (err) { console.error("Load error:", err); }
@@ -101,7 +118,7 @@ export default function ParentDashboard() {
     /* ── chart data ── */
     const midTermData = record?.mid_term_scores?.map(m => ({ name: m.subject, score: m.score })) || [];
     const gpaTrendData = midTermData.length > 1
-        ? midTermData.map((m) => ({ name: m.name, gpa: +(m.score / 10).toFixed(1) }))
+        ? midTermData.map((m) => ({ name: m.name, gpa: m.score }))
         : record?.cgpa ? [{ name: "Current", gpa: record.cgpa }] : [];
 
     if (loading) return <div className="min-h-screen bg-[#FBE9D0] flex items-center justify-center"><motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: "linear" }}><RefreshCw size={36} className="text-[#244855]" /></motion.div></div>;
